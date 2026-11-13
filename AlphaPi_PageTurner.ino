@@ -525,7 +525,25 @@ void applyModeWireless(uint8_t mode) {
     // 否则会导致同时长按 A+B 触发后，单键事件被误触发
 }
 
-// BLE 连接状态回调
+// 蓝牙图标占用前三行，设备编号放在底排。
+void showBluetoothStatus(bool connected, bool showSymbol, uint32_t durationMs) {
+    uint8_t pattern[25] = {};
+    if (showSymbol) {
+        if (connected) {
+            pattern[1] = pattern[2] = pattern[3] = 1;
+            pattern[6] = pattern[8] = 1;
+            pattern[11] = pattern[12] = pattern[13] = 1;
+        } else {
+            pattern[2] = pattern[6] = pattern[7] = pattern[8] = pattern[12] = 1;
+        }
+    }
+    const uint8_t count = bleHid.selectedHost() + 1;
+    const uint8_t start = count == 1 ? 22 : 21;
+    for (uint8_t dot = 0; dot < count; ++dot) pattern[start + dot] = 1;
+    display.showPattern(pattern);
+    screenOffDeadline = durationMs ? millis() + durationMs : 0;
+}
+
 // BLE 连接状态回调
 void onBleConnection(bool connected) {
     bleConnected = connected;
@@ -536,19 +554,13 @@ void onBleConnection(bool connected) {
         return;
     }
     
-    if (connected) {
-        // 连接成功：显示连接图标，2 秒后自动熄灭
-        showIconWithTimeout("connected", 2000);
-    } else {
-        // 断开连接：显示等待图标，常亮
-        showIconWithTimeout("waiting", 0);
-    }
+    if (!bleHid.isPairing()) showBluetoothStatus(connected, true, connected ? 2000 : 0);
 }
 
 void setup() {
     // 初始化串口（即使无法使用也初始化，不影响功能）
     Serial.begin(115200);
-    Serial.println("AlphaPi PageTurner 0001");
+    Serial.println("AlphaPi PageTurner 0002");
     delay(100);
     
     // 初始化点阵显示
@@ -652,13 +664,20 @@ void loop() {
     // 蓝牙管理使用单键。A+C 保留原来的键位模式切换。
     static bool hostMenu = false;
     static uint32_t hostMenuStart = 0;
+    static bool pairingDisplayed = false;
+    static bool pairingSymbol = true;
+    static uint32_t pairingFrameTime = 0;
     if (hostMenu) {
         Button* const keys[] = {&buttons.A, &buttons.B, &buttons.C};
         for (uint8_t slot = 0; slot < 3; ++slot) {
             const bool pair = keys[slot]->longPressed();
             if (!pair && !keys[slot]->pressed()) continue;
             bleHid.selectHost(slot, pair);
-            showIconWithTimeout(bleHid.isConnected() ? "connected" : "waiting", 1500);
+            const bool connected = bleHid.isConnected();
+            pairingDisplayed = bleHid.isPairing();
+            pairingSymbol = true;
+            pairingFrameTime = millis();
+            showBluetoothStatus(connected, true, connected ? 2000 : 0);
             hostMenu = false;
             updateActivity();
             // A selection made on a long press generates no short press on release.
@@ -668,9 +687,38 @@ void loop() {
         if (anyDown) hostMenuStart = millis();
         if (hostMenu && millis() - hostMenuStart >= 6000) {
             hostMenu = false;
-            showCurrentModeIcon(2000);
+            if (pairingDisplayed) showBluetoothStatus(false, pairingSymbol, 0);
+            else showCurrentModeIcon(2000);
         }
         return;
+    }
+
+    if (pairingDisplayed) {
+        const bool connected = bleHid.isConnected();
+        if (!bleHid.isPairing()) {
+            pairingDisplayed = false;
+            if (!connected) showBluetoothStatus(false, true, 2000);
+            updateActivity();
+        } else {
+            if (millis() - pairingFrameTime >= 200) {
+                pairingFrameTime = millis();
+                pairingSymbol = !pairingSymbol;
+                showBluetoothStatus(false, pairingSymbol, 0);
+            }
+            // 长按 A 可重新选择配对位，配对期间忽略翻页按键。
+            buttons.A.pressed();
+            buttons.B.pressed();
+            buttons.B.longPressed();
+            buttons.C.pressed();
+            buttons.C.longPressed();
+            if (buttons.A.longPressed()) {
+                hostMenu = true;
+                hostMenuStart = millis();
+                showBluetoothStatus(false, false, 0);
+            }
+            delay(10);
+            return;
+        }
     }
 
     // 组合键松完前消耗单键事件。
@@ -1337,11 +1385,7 @@ void loop() {
                 stopAutoPage();
                 hostMenu = true;
                 hostMenuStart = millis();
-                const uint8_t slot = bleHid.selectedHost();
-                uint8_t pattern[25] = {};
-                for (uint8_t dot = 0; dot <= slot; ++dot) pattern[11 + dot] = 1;
-                display.showPattern(pattern);
-                screenOffDeadline = 0;
+                showBluetoothStatus(false, false, 0);
                 return;
             }
         }

@@ -65,6 +65,7 @@ public:
     // 切换至指定配对位，可开启 60 秒配对窗口。
     void selectHost(uint8_t slot, bool pair);
     uint8_t selectedHost() const { return _slot; }
+    bool isPairing() const { return _pairing; }
 
     // 设置连接状态回调
     void setConnectionCallback(void (*callback)(bool connected));
