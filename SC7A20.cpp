@@ -1,8 +1,4 @@
-﻿#include <BLEHIDKeys.h>
-#include <BLEHIDMediaKeys.h>
-#include <HijelHID_BLEKeyboard.h>
-
-/*
+﻿/*
  * SC7A20.cpp - SC7A20 加速度计驱动与摇晃检测实现
  * 
  * 按照 Python 版的摇晃检测逻辑重构：

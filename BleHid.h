@@ -1,7 +1,7 @@
 /*
  * BleHid.h - BLE HID 键盘和媒体键功能
  * 
- * 使用 HijelHID_BLEKeyboard 库实现
+ * 基于 NimBLE-Arduino
  * 
  * 支持：
  * - 键盘键（方向键、Page Up/Down 等）
@@ -12,28 +12,30 @@
 #define BLEHID_H
 
 #include <Arduino.h>
-#include <HijelHID_BLEKeyboard.h>
+#include <NimBLEDevice.h>
 
-// 键盘修饰键
-#define KEY_MOD_NONE    0x00
-#define KEY_MOD_CTRL    0x01
-#define KEY_MOD_SHIFT   0x02
-#define KEY_MOD_ALT     0x04
-#define KEY_MOD_WIN     0x08
-
-// 常用键盘键码（使用库中定义的键码）
-// KEY_PAGE_UP, KEY_PAGE_DOWN, KEY_RIGHT_ARROW, KEY_LEFT_ARROW, KEY_UP_ARROW, KEY_DOWN_ARROW 等
-
-// 媒体键码（使用库中定义的键码）
-// MEDIA_NEXT_TRACK, MEDIA_PREV_TRACK, MEDIA_STOP, MEDIA_PLAY_PAUSE,
-// MEDIA_MUTE, MEDIA_VOLUME_UP, MEDIA_VOLUME_DOWN 等
+constexpr uint8_t KEY_ESCAPE = 0x29;
+constexpr uint8_t KEY_TAB = 0x2b;
+constexpr uint8_t KEY_SPACE = 0x2c;
+constexpr uint8_t KEY_DOWN = 0x51;
+constexpr uint8_t KEY_UP = 0x52;
+constexpr uint8_t KEY_KP_ENTER = 0x58;
+constexpr uint8_t KEY_PAGE_UP = 0x4b;
+constexpr uint8_t KEY_PAGE_DOWN = 0x4e;
+constexpr uint8_t KEY_RIGHT = 0x4f;
+constexpr uint8_t KEY_LEFT = 0x50;
+constexpr uint16_t MEDIA_NEXT_TRACK = 0xb5;
+constexpr uint16_t MEDIA_PREV_TRACK = 0xb6;
+constexpr uint16_t MEDIA_STOP = 0xb7;
+constexpr uint16_t MEDIA_PLAY_PAUSE = 0xcd;
+constexpr uint16_t MEDIA_VOLUME_UP = 0xe9;
+constexpr uint16_t MEDIA_VOLUME_DOWN = 0xea;
 
 class BleHid {
 public:
-    BleHid();
     
     // 初始化 BLE HID
-    void begin(const char* deviceName = "AlphaPi Turner");
+    bool begin(const char* deviceName = "AlphaPi Turner");
 
     // 设置蓝牙发射功率（dBm，支持 -12/-9/-6/-3/0/3/6/9，须在 begin() 之后调用）
     void setTxPower(int8_t dbm);
@@ -60,18 +62,34 @@ public:
     // 发送媒体键（按下并释放）
     void sendMedia(uint16_t mediaKey);
     
+    // 切换至指定配对位，可开启 60 秒配对窗口。
+    void selectHost(uint8_t slot, bool pair);
+    uint8_t selectedHost() const { return _slot; }
+
     // 设置连接状态回调
     void setConnectionCallback(void (*callback)(bool connected));
     
 private:
-    HijelHID_BLEKeyboard _bleKeyboard;
-    bool _connected;
-    const char* _deviceName;
-    
-    void (*_connectionCallback)(bool connected);
-    
-    // 检查连接状态变化
-    void checkConnection();
+    static constexpr uint8_t HOST_COUNT = 3;
+    static constexpr uint16_t NO_CONNECTION = BLE_HS_CONN_HANDLE_NONE;
+
+    NimBLEServer* _server = nullptr;
+    NimBLECharacteristic* _keyboard = nullptr;
+    NimBLECharacteristic* _consumer = nullptr;
+    NimBLEAddress _hosts[HOST_COUNT];
+    uint8_t _slot = 0;
+    uint16_t _pending = NO_CONNECTION;
+    uint16_t _ready = NO_CONNECTION;
+    uint32_t _pendingSince = 0;
+    bool _connected = false;
+    bool _switching = false;
+    bool _pairing = false;
+    uint32_t _pairingSince = 0;
+    void (*_connectionCallback)(bool connected) = nullptr;
+
+    void updateConnection();
+    void startAdvertising();
+    void sendReport(NimBLECharacteristic* report, uint8_t* data, size_t length);
 };
 
 #endif // BLEHID_H

@@ -1,32 +1,199 @@
-/*
- * BleHid.cpp - BLE HID 键盘和媒体键功能实现
- * 
- * 使用 HijelHID_BLEKeyboard 库实现
- */
-
 #include "BleHid.h"
+#include <NimBLEHIDDevice.h>
+#include <Preferences.h>
 #include "esp_gap_ble_api.h"
-#include <NimBLEDevice.h>
+
+namespace {
+uint8_t reportMap[] = {
+    0x05, 0x01, 0x09, 0x06, 0xa1, 0x01, 0x85, 0x01, // Keyboard, report 1
+    0x05, 0x07, 0x19, 0xe0, 0x29, 0xe7, 0x15, 0x00, 0x25, 0x01,
+    0x75, 0x01, 0x95, 0x08, 0x81, 0x02,              // Modifiers
+    0x75, 0x08, 0x95, 0x01, 0x81, 0x01,              // Reserved
+    0x19, 0x00, 0x2a, 0xff, 0x00, 0x26, 0xff, 0x00,
+    0x75, 0x08, 0x95, 0x06, 0x81, 0x00, 0xc0,        // Six key usages
+    0x05, 0x0c, 0x09, 0x01, 0xa1, 0x01, 0x85, 0x02, // Consumer control, report 2
+    0x15, 0x00, 0x26, 0xff, 0x03, 0x19, 0x00, 0x2a, 0xff, 0x03,
+    0x75, 0x10, 0x95, 0x01, 0x81, 0x00, 0xc0
+};
+
+void hostKey(uint8_t slot, char (&key)[6]) {
+    snprintf(key, sizeof(key), "host%u", static_cast<unsigned>(slot));
+}
+}
+
+bool BleHid::begin(const char* deviceName) {
+    if (!NimBLEDevice::init(deviceName)) return false;
+    for (auto& host : _hosts) host = NimBLEAddress{};
+    _slot = 0;
+    Preferences prefs;
+    if (prefs.begin("ble_hosts", true)) {
+        _slot = prefs.getUChar("selected", 0) % HOST_COUNT;
+        for (uint8_t slot = 0; slot < HOST_COUNT; ++slot) {
+            char key[6];
+            hostKey(slot, key);
+            ble_addr_t stored{};
+            if (prefs.getBytesLength(key) == sizeof(stored)) {
+                prefs.getBytes(key, &stored, sizeof(stored));
+                _hosts[slot] = NimBLEAddress(stored);
+                if (!NimBLEDevice::isBonded(_hosts[slot])) _hosts[slot] = NimBLEAddress{};
+            }
+        }
+    }
+
+    NimBLEDevice::setSecurityAuth(true, false, true);
+    NimBLEDevice::setSecurityIOCap(BLE_HS_IO_NO_INPUT_OUTPUT);
+    NimBLEDevice::setSecurityInitKey(BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID);
+    NimBLEDevice::setSecurityRespKey(BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID);
+    _server = NimBLEDevice::createServer();
+    _server->advertiseOnDisconnect(false);
+    NimBLEHIDDevice hid(_server);
+    hid.setReportMap(reportMap, sizeof(reportMap));
+    hid.setHidInfo(0, 0x02);
+    hid.setManufacturer("AlphaPi");
+    _keyboard = hid.getInputReport(1);
+    _consumer = hid.getInputReport(2);
+    const uint8_t released[8] = {};
+    _keyboard->setValue(released, 8);
+    _consumer->setValue(released, 2);
+    hid.startServices();
+
+    auto* adv = NimBLEDevice::getAdvertising();
+    adv->setAppearance(0x03c1);
+    adv->addServiceUUID(hid.getHidService()->getUUID());
+    adv->setName(deviceName);
+    startAdvertising();
+    return true;
+}
+
+void BleHid::startAdvertising() {
+    auto* adv = NimBLEDevice::getAdvertising();
+    const auto* address = _hosts[_slot].getBase();
+    // Let the controller resolve a bonded host's private address using its IRK.
+    if (_hosts[_slot].isNull() && !_pairing) return;
+    const bool filtered = !_hosts[_slot].isNull() && ble_gap_wl_set(address, 1) == 0;
+    adv->setScanFilter(false, filtered);
+    if (!adv->isAdvertising()) adv->start();
+}
+
+void BleHid::end() {
+    NimBLEDevice::deinit(true);
+    _server = nullptr;
+    _pending = _ready = NO_CONNECTION;
+    _connected = _switching = _pairing = false;
+}
+
+void BleHid::selectHost(uint8_t slot, bool pair) {
+    if (!_server || slot >= HOST_COUNT || (slot == _slot && !pair && !_pairing)) return;
+    NimBLEDevice::getAdvertising()->stop();
+    _ready = NO_CONNECTION;
+    _switching = true;
+    _slot = slot;
+    _pairing = pair;
+    _pairingSince = millis();
+
+    Preferences prefs;
+    if (prefs.begin("ble_hosts", false)) prefs.putUChar("selected", _slot);
+    updateConnection();
+}
+
+void BleHid::updateConnection() {
+    if (!_server) return;
+    auto* adv = NimBLEDevice::getAdvertising();
+    if (_pairing && millis() - _pairingSince >= 60000) {
+        _pairing = false;
+        _switching = true;
+        adv->stop();
+    }
+
+    const auto peers = _server->getPeerDevices();
+    if (peers.empty()) {
+        _pending = _ready = NO_CONNECTION;
+        if (_switching && _pairing && !_hosts[_slot].isNull()) {
+            // Replace the old bond after the previous link has closed.
+            if (NimBLEDevice::deleteBond(_hosts[_slot])) {
+                Preferences prefs;
+                char key[6];
+                hostKey(_slot, key);
+                if (prefs.begin("ble_hosts", false)) prefs.remove(key);
+                _hosts[_slot] = NimBLEAddress{};
+            } else {
+                _pairing = false;
+            }
+        }
+        _switching = false;
+        if (!adv->isAdvertising()) startAdvertising();
+        return;
+    }
+
+    const uint16_t handle = peers.front();
+    if (_switching || (_hosts[_slot].isNull() && !_pairing)) {
+        _server->disconnect(handle);
+        return;
+    }
+    const bool wasReady = _ready == handle;
+    _ready = NO_CONNECTION;
+
+    ble_gap_conn_desc peer{};
+    if (ble_gap_conn_find(handle, &peer) != 0) return;
+    const NimBLEAddress identity(peer.peer_id_addr);
+    for (uint8_t slot = 0; slot < HOST_COUNT; ++slot) {
+        if (slot != _slot && !_hosts[slot].isNull() && _hosts[slot] == identity) {
+            _server->disconnect(handle);
+            return;
+        }
+    }
+
+    if (wasReady && peer.sec_state.encrypted && identity == _hosts[_slot]) {
+        _ready = handle;
+        return;
+    }
+    if (!_pairing && !NimBLEDevice::isBonded(identity)) {
+        _server->disconnect(handle);
+        return;
+    }
+    if (_pending != handle) {
+        _pending = handle;
+        _pendingSince = millis();
+        if (!peer.sec_state.encrypted) NimBLEDevice::startSecurity(handle);
+    }
+    if (!peer.sec_state.encrypted || !peer.sec_state.bonded ||
+        !NimBLEDevice::isBonded(identity)) {
+        if (millis() - _pendingSince > 15000) _server->disconnect(handle);
+        return;
+    }
+    if (_hosts[_slot].isNull()) {
+        char key[6];
+        hostKey(_slot, key);
+        Preferences prefs;
+        if (!prefs.begin("ble_hosts", false) ||
+            prefs.putBytes(key, identity.getBase(), sizeof(ble_addr_t)) != sizeof(ble_addr_t)) {
+            _server->disconnect(handle);
+            return;
+        }
+        _hosts[_slot] = identity;
+        _pairing = false;
+    }
+    if (_hosts[_slot] != identity) {
+        _server->disconnect(handle);
+        return;
+    }
+    _ready = handle;
+}
+
+bool BleHid::isConnected() {
+    updateConnection();
+    const bool connected = _ready != NO_CONNECTION;
+    if (connected != _connected) {
+        _connected = connected;
+        if (_connectionCallback) _connectionCallback(connected);
+    }
+    return connected;
+}
 
 // 把 esp_power_level_t 枚举换算回 dBm：相对 ESP_PWR_LVL_N0 的档数 × 3
 // （IDF 4.x/5.x 枚举数值不同，但 N0 都是基准档，这样换算对两版都成立）
 static int8_t pwrEnumToDbm(esp_power_level_t lvl) {
     return (int8_t)(((int)lvl - (int)ESP_PWR_LVL_N0) * 3);
-}
-
-BleHid::BleHid() : _bleKeyboard("AlphaPi Turner") {
-    _connected = false;
-    _deviceName = "AlphaPi Turner";
-    _connectionCallback = nullptr;
-}
-
-void BleHid::begin(const char* deviceName) {
-    _deviceName = deviceName;
-
-    // 直接调用 begin()，不创建新对象
-    _bleKeyboard.begin();
-
-    _connected = false;
 }
 
 void BleHid::setTxPower(int8_t dbm) {
@@ -66,89 +233,54 @@ void BleHid::applyAdvInterval(uint8_t mode) {
     adv->setMinInterval(minU);
     adv->setMaxInterval(maxU);
 
-    // 正在广播时重启广播使参数立即生效；已连接时新参数会在断连后的广播中使用
-    if (!_connected) {
+    if (adv->isAdvertising()) {
         adv->stop();
-        NimBLEDevice::startAdvertising();
+        startAdvertising();
     }
-    Serial.printf("BLE adv interval mode=%u (%u~%u units)\n", mode, minU, maxU);
 }
 
-void BleHid::end() {
-    _bleKeyboard.end();
-    _connected = false;
-}
-
-bool BleHid::isConnected() {
-    bool newState = _bleKeyboard.isConnected();
-    
-    // 检查连接状态变化
-    if (newState != _connected) {
-        _connected = newState;
-        if (_connectionCallback) {
-            _connectionCallback(_connected);
-        }
-    }
-    
-    return _connected;
+void BleHid::sendReport(NimBLECharacteristic* report, uint8_t* data, size_t length) {
+    if (!isConnected()) return;
+    const uint16_t handle = _ready;
+    if (!report->notify(data, length, handle)) return;
+    delay(20);
+    memset(data, 0, length);
+    report->notify(data, length, handle);
 }
 
 void BleHid::sendKey(uint8_t key) {
-    if (!_connected) return;
-    _bleKeyboard.tap(key);
+    uint8_t keys[3] = {key, 0, 0};
+    sendCombination(keys);
 }
 
 void BleHid::sendCombination(uint8_t keys[3]) {
-    if (!_connected) return;
-    int count = 0;
-    for (int i = 0; i < 3; i++) {
-        if (keys[i] != 0) {
-            _bleKeyboard.press(keys[i]);
-            count++;
-        }
-    }
-    if (count > 0) {
-        delay(15);
-        _bleKeyboard.releaseAll();
-    }
+    uint8_t types[3] = {};
+    sendCombination(keys, types);
 }
 
 void BleHid::sendCombination(uint8_t keys[3], uint8_t types[3]) {
-    if (!_connected) return;
-    
-    // 先处理键盘键（同时按下）
-    int kbCount = 0;
-    for (int i = 0; i < 3; i++) {
-        if (keys[i] != 0 && types[i] == 0) {
-            _bleKeyboard.press(keys[i]);
-            kbCount++;
+    uint8_t report[8] = {};
+    uint8_t position = 2;
+    for (uint8_t i = 0; i < 3; ++i) {
+        const uint8_t key = keys[i];
+        if (!key || types[i] != 0) continue;
+        if (key >= 0xe0 && key <= 0xe7) {
+            report[0] |= 1U << (key - 0xe0);
+        } else {
+            report[position++] = key;
         }
     }
-    if (kbCount > 0) {
-        delay(15);
-        _bleKeyboard.releaseAll();
-        delay(5);
-    }
-    
-    // 再处理媒体键（单独发送，因为媒体键是Consumer Report）
-    for (int i = 0; i < 3; i++) {
-        if (keys[i] != 0 && types[i] == 1) {
-            uint16_t mediaKey = keys[i];  // 明确转换为uint16_t，确保调用tap(uint16_t)重载
-            _bleKeyboard.tap(mediaKey);
-            delay(15);
-        }
+    if (report[0] || position > 2) sendReport(_keyboard, report, sizeof(report));
+    for (uint8_t i = 0; i < 3; ++i) {
+        if (keys[i] && types[i] == 1) sendMedia(keys[i]);
     }
 }
 
 void BleHid::sendMedia(uint16_t mediaKey) {
-    if (!_connected) return;
-    _bleKeyboard.tap(mediaKey);
+    uint8_t report[] = {static_cast<uint8_t>(mediaKey), static_cast<uint8_t>(mediaKey >> 8)};
+    sendReport(_consumer, report, sizeof(report));
 }
 
 void BleHid::setConnectionCallback(void (*callback)(bool connected)) {
     _connectionCallback = callback;
-}
-
-void BleHid::checkConnection() {
-    isConnected();
 }

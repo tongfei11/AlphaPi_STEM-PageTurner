@@ -483,7 +483,7 @@ void enableBLE() {
     // 纯 BLE 模式主频降到 80MHz，可明显降低 CPU 功耗（BLE 控制器时序由硬件保证，不受主频影响）
     setCpuFrequencyMhz(80);
 
-    bleHid.begin("AlphaPi Turner");
+    if (!bleHid.begin("AlphaPi Turner")) return;
 
     // 应用配置的蓝牙发射功率（默认 -6dBm）和广播间隔档位（默认秒连）
     bleHid.setTxPower(webConfig.getConfig()->bleTxPower);
@@ -548,6 +548,7 @@ void onBleConnection(bool connected) {
 void setup() {
     // 初始化串口（即使无法使用也初始化，不影响功能）
     Serial.begin(115200);
+    Serial.println("AlphaPi PageTurner 0001");
     delay(100);
     
     // 初始化点阵显示
@@ -647,6 +648,61 @@ void setup() {
 void loop() {
     // 更新按键状态（所有模式都需要）
     buttons.update();
+
+    // 蓝牙管理使用单键。A+C 保留原来的键位模式切换。
+    static bool hostMenu = false;
+    static uint32_t hostMenuStart = 0;
+    if (hostMenu) {
+        Button* const keys[] = {&buttons.A, &buttons.B, &buttons.C};
+        for (uint8_t slot = 0; slot < 3; ++slot) {
+            const bool pair = keys[slot]->longPressed();
+            if (!pair && !keys[slot]->pressed()) continue;
+            bleHid.selectHost(slot, pair);
+            showIconWithTimeout(bleHid.isConnected() ? "connected" : "waiting", 1500);
+            hostMenu = false;
+            updateActivity();
+            // A selection made on a long press generates no short press on release.
+            break;
+        }
+        const bool anyDown = buttons.A.isDown() || buttons.B.isDown() || buttons.C.isDown();
+        if (anyDown) hostMenuStart = millis();
+        if (hostMenu && millis() - hostMenuStart >= 6000) {
+            hostMenu = false;
+            showCurrentModeIcon(2000);
+        }
+        return;
+    }
+
+    // 组合键松完前消耗单键事件。
+    static bool hostChord = false;
+    static bool hostChordTriggered = false;
+    static uint32_t hostChordStart = 0;
+    const bool hostKeysDown = buttons.A.isDown() && buttons.C.isDown() && !buttons.B.isDown();
+    if (!hostChord && hostKeysDown && bleEnabled && !gameMode && testMode == 6) {
+        hostChord = true;
+        hostChordTriggered = false;
+        hostChordStart = millis();
+    }
+    if (hostChord) {
+        buttons.A.pressed();
+        buttons.A.longPressed();
+        buttons.B.pressed();
+        buttons.B.longPressed();
+        buttons.C.pressed();
+        buttons.C.longPressed();
+        if (!hostKeysDown) hostChordTriggered = true;
+        if (!hostChordTriggered && millis() - hostChordStart >= 800) {
+            hostChordTriggered = true;
+            DeviceConfig* config = webConfig.getConfig();
+            config->currentMode = getNextEnabledMode(config->currentMode);
+            webConfig.saveConfig();
+            applyModeWireless(config->currentMode);
+            showCurrentModeIcon(2000);
+        }
+        if (!buttons.A.isDown() && !buttons.B.isDown() && !buttons.C.isDown()) hostChord = false;
+        return;
+    }
+
     
     // ========== 同时长按 B+C 检测（进入/退出游戏模式）==========
     bool bDown = buttons.B.isDown();
@@ -1160,7 +1216,7 @@ void loop() {
     else if (testMode == 6) {
         // ========== 完整功能版（和 Python 版一致）==========
         // 短按A：切换翻页箭头显示开关
-        // 长按A：切换键位模式
+        // 长按A：进入蓝牙管理（KO 模式下切换 STA/AP）
         // 短按B：下一页/下一曲/音量+（受方向对调影响）
         // 长按B：开关摇晃翻页功能
         // 短按C：上一页/上一曲/音量-（受方向对调影响）
@@ -1256,7 +1312,7 @@ void loop() {
             showIconWithTimeout(config->pageDisplayEnable ? "arrow_on" : "arrow_off", 2000);
         }
         
-        // 长按A：KO模式下切换AP/STA模式，其他模式下切换模式
+        // 长按A：KO 模式切换 AP/STA，蓝牙模式进入蓝牙管理
         if (buttons.A.longPressed() && !abSuppressSingle) {
             updateActivity();
             if (config->currentMode == MODE_KOREADER) {
@@ -1278,12 +1334,15 @@ void loop() {
                     Serial.println("KO mode: STA mode enabled, connecting to router");
                 }
             } else {
-                // 其他模式：切换模式
-                config->currentMode = getNextEnabledMode(config->currentMode);
-                webConfig.saveConfig();
-                // 切换模式时同时切换 WiFi 和蓝牙状态
-                applyModeWireless(config->currentMode);
-                showCurrentModeIcon(2000);
+                stopAutoPage();
+                hostMenu = true;
+                hostMenuStart = millis();
+                const uint8_t slot = bleHid.selectedHost();
+                uint8_t pattern[25] = {};
+                for (uint8_t dot = 0; dot <= slot; ++dot) pattern[11 + dot] = 1;
+                display.showPattern(pattern);
+                screenOffDeadline = 0;
+                return;
             }
         }
         
