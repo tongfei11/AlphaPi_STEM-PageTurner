@@ -1,6 +1,6 @@
 # AlphaPi 蓝牙翻页器 · 精简版
 
-基于 [shj4588/AlphaPi_STEM-PageTurner](https://github.com/shj4588/AlphaPi_STEM-PageTurner) V1.0.5 开发，保留原作者的 Git 历史与 AlphaPi 点阵、按键驱动。当前编译版本 **0003**。
+基于 [shj4588/AlphaPi_STEM-PageTurner](https://github.com/shj4588/AlphaPi_STEM-PageTurner) V1.0.5 开发，保留原作者的 Git 历史与 AlphaPi 点阵、按键驱动。当前编译版本 **0004**。
 
 面向 AlphaPi Zero / STEM ESP32-C3（4 MB Flash）。日常通过三个实体按键切换用途和控制设备，支持记住三个蓝牙主机、每次连接其中一台。
 
@@ -66,7 +66,7 @@ Auto 运行时 B/C 互斥，按当前正在执行的键会停止，按另一个�
 ./build.command
 ```
 
-构建脚本固定使用 ESP32 Arduino core **2.0.14**、NimBLE-Arduino **2.3.7**（提交 `a17bec675cd421a5f83bb5fe266fd5b498990aa4`）。首次构建会准备依赖，工具链保存在 `toolchain/`。可用 `ALPHAPI_TOOLCHAIN_DIR` 指定已有工具链目录。
+构建脚本固定使用 ESP32 Arduino core **2.0.14**、NimBLE-Arduino **2.3.7**（提交 `a17bec675cd421a5f83bb5fe266fd5b498990aa4`）。首次构建会准备依赖，工具链共用 `~/Library/Arduino15/`，依赖库共用 `~/Documents/Arduino/libraries/`。可通过 `ARDUINO_DIRECTORIES_DATA` 和 `ARDUINO_DIRECTORIES_USER` 覆盖用户级目录。
 
 | 路径 | 内容 |
 | --- | --- |
@@ -89,12 +89,12 @@ c++ tests/mode_policy_test.cpp -o /tmp/alphapi-mode-test
 
 ## 刷机
 
-生成的 `AlphaPi-PageTurner-0003-app.bin` 是 ESP32-C3 应用镜像，写入 **0x10000**。
+生成的 `AlphaPi-PageTurner-0004-app.bin` 是 ESP32-C3 应用镜像，写入 **0x10000**。
 
 从已经运行 AlphaPi Arduino 固件的设备升级时先备份，选择主程序模式并保留原有引导和分区。全新板需另行准备匹配的 bootloader 和分区表。刷机工具应检查设备芯片、当前应用分区容量与启动选择。
 
 迁移时保留旧固件的自定义键值、无线参数、空闲超时和三设备配对身份。首次使用精简配置时 Custom/Auto 隐藏，被裁掉的当前模式回到 Page。
 
-0003 已完成整机编译、模式切换规则测试和镜像离线检查。三主机切换、热点保存、连续使用及唤醒操作的实机验收待完成。
+0004 已完成整机编译、模式切换规则测试和镜像离线检查。三主机切换、热点保存、连续使用及唤醒操作的实机验收待完成。
 
 原项目中的摇晃、游戏、KOReader、音量及播放控制独立模式已从此版本移除。历史源码可从上游或 Git 历史查看。KOReader 的独立固件尚待另行开发。

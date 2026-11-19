@@ -1,2 +1,2 @@
 #pragma once
-#define BUILD_VERSION "0003"
+#define BUILD_VERSION "0004"
